@@ -1,0 +1,22 @@
+{
+  "name": "distributed-system-practice",
+  "version": "1.0.0",
+  "description": "a pratice to learn and understand distributed systems",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon server.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "dependencies": {
+    "bullmq": "^5.66.4",
+    "express": "^5.2.1",
+    "ioredis": "^5.8.2",
+    "uuid": "^13.0.0"
+  }
+}
