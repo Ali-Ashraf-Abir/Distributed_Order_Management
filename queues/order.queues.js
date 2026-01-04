@@ -1,7 +1,10 @@
 import { Queue } from "bullmq";
-import IOredis from "ioredis";
+import IORedis from "ioredis";
 
-const connection = new IOredis();
+const connection = new IORedis({
+  maxRetriesPerRequest: null
+});
+
 
 const orderQueue = new Queue("orderQueue", { connection });
 
