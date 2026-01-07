@@ -9,7 +9,6 @@ export async function emitJobEvent(payload) {
       body: JSON.stringify(payload),
     });
   } catch (err) {
-    // Never crash worker because UI failed
     console.error("⚠️ Failed to emit job event:", err.message);
   }
 }
@@ -24,4 +23,24 @@ export async function emitWorkerHeartbeat(payload) {
   } catch (err) {
     console.error("⚠️ Failed to emit heartbeat:", err.message);
   }
+}
+
+// Poll for config updates from server
+let configCallback = null;
+
+export function onConfigUpdate(callback) {
+  configCallback = callback;
+  
+  // Poll server for config every 2 seconds
+  setInterval(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/internal/config`);
+      const config = await response.json();
+      if (configCallback) {
+        configCallback(config);
+      }
+    } catch (err) {
+      console.error("⚠️ Failed to fetch config:", err.message);
+    }
+  }, 2000);
 }

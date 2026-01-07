@@ -7,3 +7,7 @@ export function emitJobUpdate(payload) {
 export function emitWorkerHeartbeat(payload) {
   io.emit("worker:heartbeat", payload);
 }
+
+export function emitConfigUpdate(callback) {
+  socket.on("config:update", callback);
+}

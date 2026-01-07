@@ -11,7 +11,8 @@ export async function createOrder(orderData) {
     _id: orderId,
     userId,
     amount,
-    status: "PENDING"
+    status: "PENDING",
+    createdAt: new Date(),
   });
     emitJobUpdate({
     id: orderId,

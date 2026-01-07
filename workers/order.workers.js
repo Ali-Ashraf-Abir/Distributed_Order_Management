@@ -2,11 +2,23 @@ import "dotenv/config";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import client, { orders, payments, db } from "../db/db.js";
-import { emitJobEvent, emitWorkerHeartbeat } from "./event.client.js";
+import { emitJobEvent, emitWorkerHeartbeat, onConfigUpdate } from "./event.client.js";
 
 const connection = new IORedis({ maxRetriesPerRequest: null });
 const workerId = `worker-${process.pid}`;
 let shuttingDown = false;
+
+// Configuration state (updated from server)
+let workerConfig = {
+  failureRate: 0.5,
+  processingDelay: 0,
+};
+
+// Listen for config updates from server
+onConfigUpdate((newConfig) => {
+  workerConfig = { ...workerConfig, ...newConfig };
+  console.log("📝 Config updated:", workerConfig);
+});
 
 const worker = new Worker(
   "orderQueue",
@@ -16,7 +28,6 @@ const worker = new Worker(
     const { orderId } = job.data;
     const session = client.startSession();
 
-    // 🔔 PROCESSING event
     await emitJobEvent({
       id: orderId,
       status: "PROCESSING",
@@ -25,13 +36,17 @@ const worker = new Worker(
     });
 
     try {
+      if (workerConfig.processingDelay > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, workerConfig.processingDelay)
+        );
+      }
+
       await session.withTransaction(async () => {
-        // Idempotency (DB-enforced)
         await payments.insertOne({ orderId }, { session });
 
-        // Simulated failure
-        if (Math.random() < 0.5) {
-          throw new Error("Payment failure");
+        if (Math.random() < workerConfig.failureRate) {
+          throw new Error("Payment failure (simulated)");
         }
 
         await orders.updateOne(
@@ -41,7 +56,6 @@ const worker = new Worker(
         );
       });
 
-      // ✅ SUCCESS event (AFTER commit)
       await emitJobEvent({
         id: orderId,
         status: "PAID",
@@ -50,7 +64,6 @@ const worker = new Worker(
       });
 
     } catch (err) {
-      // 🔑 Idempotency duplicate (safe skip)
       if (err.code === 11000) {
         console.log(`⚠️ Order ${orderId} already processed`);
         return;
@@ -59,7 +72,6 @@ const worker = new Worker(
       const willRetry = job.attemptsMade + 1 < job.opts.attempts;
 
       if (willRetry) {
-
         await emitJobEvent({
           id: orderId,
           status: "RETRYING",
@@ -77,10 +89,14 @@ const worker = new Worker(
           error: err.message,
           timestamp: new Date(),
         });
+        
+        await orders.updateOne(
+          { _id: orderId },
+          { $set: { status: "FAILED" } }
+        );
       }
 
       throw err;
-
     } finally {
       await session.endSession();
     }
@@ -98,10 +114,8 @@ const heartbeat = setInterval(async () => {
     workerId,
     lastSeenAt: new Date(),
   });
-
 }, 5000);
 
-// 🛑 Graceful shutdown
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
