@@ -1,29 +1,19 @@
-import Database from "better-sqlite3";
-import path from "path";
-import { fileURLToPath } from "url";
+import { MongoClient } from "mongodb";
+import "dotenv/config";
+const uri = process.env.MONGODB_URI;
+if (!uri) {
+  throw new Error("MONGODB_URI missing");
+}
 
-// emulate __dirname in ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const client = new MongoClient(uri);
 
-// FORCE single DB location
-const dbPath = path.join(__dirname, "..", "orders.db");
+export async function connectDB() {
+  await client.connect();
+  console.log("✅ MongoDB connected");
+}
 
-const db = new Database(dbPath);
+export const db = client.db(process.env.MONGODB_DB || "orders");
+export const orders = db.collection("orders");
+export const payments = db.collection("payments");
 
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS orders (
-    id TEXT PRIMARY KEY,
-    user_id TEXT,
-    amount INTEGER,
-    status TEXT
-  )
-`).run();
-
-// payments table (idempotency!)
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS payments (
-    order_id TEXT PRIMARY KEY
-  )
-`).run();
-export default db;
+export default client;

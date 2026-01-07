@@ -1,60 +1,118 @@
+import "dotenv/config";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
-import db from "../db/db.js";
+import client, { orders, payments, db } from "../db/db.js";
+import { emitJobEvent, emitWorkerHeartbeat } from "./event.client.js";
 
-const connection = new IORedis({
-  maxRetriesPerRequest: null
-});
+const connection = new IORedis({ maxRetriesPerRequest: null });
+const workerId = `worker-${process.pid}`;
+let shuttingDown = false;
 
 const worker = new Worker(
   "orderQueue",
   async (job) => {
+    if (shuttingDown) return;
+
     const { orderId } = job.data;
+    const session = client.startSession();
 
-    console.log(`checking idempotency for order: ${orderId}`);
-
-    // 1️⃣ Idempotency check
-    const alreadyPaid = db
-      .prepare(`SELECT 1 FROM payments WHERE order_id = ?`)
-      .get(orderId);
-
-    if (alreadyPaid) {
-      console.log(`⚠️ Order ${orderId} already processed — skipping`);
-      return;
-    }
-
-    // 2️⃣ Simulate payment failure
-    if (Math.random() < 0.5) {
-      throw new Error(" Payment service temporarily unavailable");
-    }
-
-    // 3️⃣ Transaction (IMPORTANT)
-    const tx = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO payments (order_id)
-        VALUES (?)
-      `).run(orderId);
-
-      db.prepare(`
-        UPDATE orders
-        SET status = 'PAID'
-        WHERE id = ?
-      `).run(orderId);
+    // 🔔 PROCESSING event
+    await emitJobEvent({
+      id: orderId,
+      status: "PROCESSING",
+      attempts: job.attemptsMade,
+      timestamp: new Date(),
     });
 
-    tx();
+    try {
+      await session.withTransaction(async () => {
+        // Idempotency (DB-enforced)
+        await payments.insertOne({ orderId }, { session });
 
-    console.log(`✅ Order ${orderId} marked as PAID`);
+        // Simulated failure
+        if (Math.random() < 0.5) {
+          throw new Error("Payment failure");
+        }
+
+        await orders.updateOne(
+          { _id: orderId },
+          { $set: { status: "PAID" } },
+          { session }
+        );
+      });
+
+      // ✅ SUCCESS event (AFTER commit)
+      await emitJobEvent({
+        id: orderId,
+        status: "PAID",
+        attempts: job.attemptsMade,
+        timestamp: new Date(),
+      });
+
+    } catch (err) {
+      // 🔑 Idempotency duplicate (safe skip)
+      if (err.code === 11000) {
+        console.log(`⚠️ Order ${orderId} already processed`);
+        return;
+      }
+
+      const willRetry = job.attemptsMade + 1 < job.opts.attempts;
+
+      if (willRetry) {
+
+        await emitJobEvent({
+          id: orderId,
+          status: "RETRYING",
+          attempt: job.attemptsMade + 1,
+          maxAttempts: job.opts.attempts,
+          error: err.message,
+          timestamp: new Date(),
+        });
+      } else {
+        await emitJobEvent({
+          id: orderId,
+          status: "FAILED",
+          attempt: job.attemptsMade + 1,
+          maxAttempts: job.opts.attempts,
+          error: err.message,
+          timestamp: new Date(),
+        });
+      }
+
+      throw err;
+
+    } finally {
+      await session.endSession();
+    }
   },
   { connection }
 );
 
-worker.on("failed", (job, err) => {
-  console.log(
-    `Job ${job.id} failed (attempt ${job.attemptsMade}): ${err.message}`
+const heartbeat = setInterval(async () => {
+  await db.collection("worker_heartbeats").updateOne(
+    { workerId },
+    { $set: { lastSeenAt: new Date() } },
+    { upsert: true }
   );
-});
+  emitWorkerHeartbeat({
+    workerId,
+    lastSeenAt: new Date(),
+  });
 
-worker.on("completed", (job) => {
-  console.log(`🎉 Job ${job.id} completed`);
-});
+}, 5000);
+
+// 🛑 Graceful shutdown
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log("🛑 Shutting down worker...");
+  clearInterval(heartbeat);
+  await worker.pause(true);
+  await worker.close();
+  await client.close();
+  process.exit(0);
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
